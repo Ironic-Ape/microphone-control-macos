@@ -72,8 +72,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
+            var unregisteredExistingService = false
             if startupService.status != .notRegistered && startupService.status != .notFound {
                 try startupService.unregister()
+                unregisteredExistingService = true
+            }
+            if unregisteredExistingService {
+                // macOS removes the background-item code requirement asynchronously.
+                // Keep the installer waiting until a replacement can register cleanly.
+                Thread.sleep(forTimeInterval: 8)
             }
             if arguments.contains("--repair-startup") {
                 try startupService.register()
