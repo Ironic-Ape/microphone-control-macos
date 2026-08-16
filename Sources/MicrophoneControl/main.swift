@@ -24,14 +24,17 @@ private enum StartupDisposition {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private struct MutedInputState {
+        let originalVolume: Float32
+        let originalMuted: Bool
+        let usesDeviceMute: Bool
+    }
+
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let inputEngine = AVAudioEngine()
     private let startupService = SMAppService.agent(plistName: Product.startupPlistName)
     private var startupMenuItem: NSMenuItem?
-    private var originalVolume: Float32 = 1
-    private var originalMuted = false
-    private var usesDeviceMute = false
-    private var mutedDeviceID: AudioDeviceID?
+    private var mutedInputStates: [AudioDeviceID: MutedInputState] = [:]
     private var muted = false
     private var usesAirPodsMuteAPI = false
     private var remoteCommandTokens: [Any] = []
@@ -39,6 +42,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var microphonePermissionGranted = false
     private var instanceLockFileDescriptor: Int32 = -1
     private var approvalTimer: Timer?
+    private var muteEnforcementTimer: Timer?
 
     private var isDevelopmentLaunch: Bool {
         CommandLine.arguments.contains("--development")
@@ -293,6 +297,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self, self.microphonePermissionGranted else { return }
             inputEventLogger.info("Audio configuration changed; refreshing the input session")
             self.restartRetainedInputSession(reason: "configuration-change")
+            if self.muted {
+                let applied = self.applyGlobalMicrophoneMute(true)
+                inputEventLogger.info("Privacy mute applied to the new input route; success: \(applied)")
+            }
         }
 
         if permissionAlreadyGranted {
@@ -438,6 +446,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let state = notification.userInfo?[AVAudioApplication.muteStateKey] as? Bool
                     ?? AVAudioApplication.shared.isInputMuted
                 inputEventLogger.info("Microphone mute state changed; muted: \(state)")
+                if self.muted, !state, !self.mutedInputStates.isEmpty {
+                    inputEventLogger.info("Ignoring route-level unmute while privacy mute is active")
+                    return
+                }
                 self.muted = state
                 self.refreshStatus()
             }
@@ -471,46 +483,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyGlobalMicrophoneMute(_ shouldMute: Bool) -> Bool {
         if !shouldMute {
-            return restoreMutedInputDevice()
+            return restoreMutedInputDevices()
         }
 
         guard let deviceID = defaultInputDevice() else {
             inputEventLogger.error("No default microphone was available")
             return false
         }
-        if muted, mutedDeviceID == deviceID {
+        if mutedInputStates[deviceID] != nil {
+            muted = true
             return true
-        }
-        if muted, !restoreMutedInputDevice() {
-            return false
         }
 
         if let isMuted = inputMuted(for: deviceID) {
-            originalMuted = isMuted
-            usesDeviceMute = true
             guard setInputMuted(true, for: deviceID) else { return false }
+            mutedInputStates[deviceID] = MutedInputState(
+                originalVolume: 1,
+                originalMuted: isMuted,
+                usesDeviceMute: true
+            )
         } else {
-            originalVolume = max(inputVolume(for: deviceID), 0.01)
-            usesDeviceMute = false
+            let originalVolume = max(inputVolume(for: deviceID), 0.01)
             guard setInputVolume(0, for: deviceID) else { return false }
+            mutedInputStates[deviceID] = MutedInputState(
+                originalVolume: originalVolume,
+                originalMuted: false,
+                usesDeviceMute: false
+            )
         }
-        mutedDeviceID = deviceID
-        muted = shouldMute
+        muted = true
+        startMuteEnforcement()
         return true
     }
 
-    private func restoreMutedInputDevice() -> Bool {
-        guard let deviceID = mutedDeviceID else {
-            muted = false
-            return true
+    private func startMuteEnforcement() {
+        guard muteEnforcementTimer == nil else { return }
+        muteEnforcementTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self, self.muted else { return }
+            if !self.applyGlobalMicrophoneMute(true) {
+                inputEventLogger.error("Privacy mute could not be applied to the active input route")
+            }
         }
-        let restored = usesDeviceMute
-            ? setInputMuted(originalMuted, for: deviceID)
-            : setInputVolume(originalVolume, for: deviceID)
-        guard restored else { return false }
-        mutedDeviceID = nil
-        muted = false
-        return true
+    }
+
+    private func restoreMutedInputDevices() -> Bool {
+        muteEnforcementTimer?.invalidate()
+        muteEnforcementTimer = nil
+        var failedDeviceIDs: [AudioDeviceID] = []
+        for (deviceID, state) in mutedInputStates {
+            let restored = state.usesDeviceMute
+                ? setInputMuted(state.originalMuted, for: deviceID)
+                : setInputVolume(state.originalVolume, for: deviceID)
+            if !restored {
+                failedDeviceIDs.append(deviceID)
+            }
+        }
+        mutedInputStates = mutedInputStates.filter { failedDeviceIDs.contains($0.key) }
+        muted = !mutedInputStates.isEmpty
+        return failedDeviceIDs.isEmpty
     }
 
     private func refreshStatus() {
@@ -546,7 +576,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func shutDownAudio() {
         approvalTimer?.invalidate()
         approvalTimer = nil
-        if muted, !restoreMutedInputDevice() {
+        muteEnforcementTimer?.invalidate()
+        muteEnforcementTimer = nil
+        if muted, !restoreMutedInputDevices() {
             inputEventLogger.error("Could not restore the microphone state during shutdown")
         }
         if inputTapInstalled {
