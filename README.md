@@ -55,3 +55,7 @@ The signing certificate and notarization profile must belong to the distributor.
 ## Startup architecture
 
 The app uses Apple's `SMAppService` API to register the bundled per-user LaunchAgent in `Contents/Library/LaunchAgents`. The service is limited to the logged-in Aqua session, uses `RunAtLoad` and `KeepAlive`, and launches the app through the bundle-relative `BundleProgram` path. It does not install a system daemon, request administrator access, or use UI automation.
+
+## License
+
+Microphone Control is available under the [MIT License](LICENSE). You may inspect, modify, redistribute, and build on the source under its terms.
