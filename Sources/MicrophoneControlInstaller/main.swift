@@ -68,7 +68,7 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         let backupURL = applicationsDirectory
             .appendingPathComponent(".microphone-control-backup-\(UUID().uuidString).app")
 
-        try fileManager.copyItem(at: payload, to: stagingURL)
+        try copyApplicationBundle(from: payload, to: stagingURL)
         var movedExistingApplication = false
         do {
             if fileManager.fileExists(atPath: destination.path) {
@@ -88,6 +88,17 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         }
 
         return destination
+    }
+
+    private func copyApplicationBundle(from source: URL, to destination: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["--norsrc", "--noextattr", source.path, destination.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw InstallerError.couldNotCopyApplication
+        }
     }
 
     private func unregisterExistingStartupService(in application: URL) throws {
@@ -120,6 +131,20 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
         for application in NSRunningApplication.runningApplications(withBundleIdentifier: "app.microphonecontrol") where !application.isTerminated {
             application.forceTerminate()
         }
+
+        let terminationDeadline = Date().addingTimeInterval(5)
+        while Date() < terminationDeadline,
+              NSRunningApplication.runningApplications(withBundleIdentifier: "app.microphonecontrol").contains(where: { !$0.isTerminated }) {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "app.microphonecontrol").contains(where: { !$0.isTerminated }) else {
+            throw InstallerError.couldNotDisablePreviousStartup
+        }
+
+        // Background Task Management cannot remove the old launch-code requirement
+        // while its helper is alive. Wait only after confirmed termination so a
+        // replacement with a new signature receives a fresh service record.
+        Thread.sleep(forTimeInterval: 8)
     }
 
     private static func showResult(title: String, message: String) {
@@ -134,12 +159,15 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
 
 private enum InstallerError: LocalizedError {
     case missingPayload
+    case couldNotCopyApplication
     case couldNotDisablePreviousStartup
 
     var errorDescription: String? {
         switch self {
         case .missingPayload:
             return "The installer does not contain the Microphone Control application. Download a new copy and try again."
+        case .couldNotCopyApplication:
+            return "Microphone Control could not be copied to your Applications folder. Check that the folder is available and try again."
         case .couldNotDisablePreviousStartup:
             return "The previous automatic-start service could not be disabled safely. Quit Microphone Control and try again."
         }

@@ -32,7 +32,7 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$LAUNCH_AGENTS"
 cp "$BUILD_DIRECTORY/$PRODUCT_NAME" "$APP_MACOS/$PRODUCT_NAME"
 cp "$ROOT_DIRECTORY/Resources/Info.plist" "$APP_CONTENTS/Info.plist"
-cp "$ROOT_DIRECTORY/Resources/app.microphonecontrol.agent.plist" "$LAUNCH_AGENTS/app.microphonecontrol.agent.plist"
+cp "$ROOT_DIRECTORY/Resources/app.microphonecontrol.agent.v2.plist" "$LAUNCH_AGENTS/app.microphonecontrol.agent.v2.plist"
 chmod 755 "$APP_MACOS/$PRODUCT_NAME"
 
 SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:--}"
@@ -42,6 +42,6 @@ else
   codesign --force --options runtime --timestamp --entitlements "$ROOT_DIRECTORY/Resources/MicrophoneControl.entitlements" --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 fi
 
-plutil -lint "$APP_CONTENTS/Info.plist" "$LAUNCH_AGENTS/app.microphonecontrol.agent.plist" "$ROOT_DIRECTORY/Resources/MicrophoneControl.entitlements"
+plutil -lint "$APP_CONTENTS/Info.plist" "$LAUNCH_AGENTS/app.microphonecontrol.agent.v2.plist" "$ROOT_DIRECTORY/Resources/MicrophoneControl.entitlements"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 echo "$APP_BUNDLE"

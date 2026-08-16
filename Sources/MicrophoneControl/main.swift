@@ -9,7 +9,7 @@ import ServiceManagement
 private enum Product {
     static let name = "Microphone Control"
     static let bundleIdentifier = "app.microphonecontrol"
-    static let startupPlistName = "app.microphonecontrol.agent.plist"
+    static let startupPlistName = "app.microphonecontrol.agent.v2.plist"
     static let managedEnvironmentKey = "MICROPHONE_CONTROL_MANAGED"
 }
 
@@ -31,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var originalVolume: Float32 = 1
     private var originalMuted = false
     private var usesDeviceMute = false
+    private var mutedDeviceID: AudioDeviceID?
     private var muted = false
     private var usesAirPodsMuteAPI = false
     private var remoteCommandTokens: [Any] = []
@@ -72,15 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
-            var unregisteredExistingService = false
             if startupService.status != .notRegistered && startupService.status != .notFound {
                 try startupService.unregister()
-                unregisteredExistingService = true
-            }
-            if unregisteredExistingService {
-                // macOS removes the background-item code requirement asynchronously.
-                // Keep the installer waiting until a replacement can register cleanly.
-                Thread.sleep(forTimeInterval: 8)
             }
             if arguments.contains("--repair-startup") {
                 try startupService.register()
@@ -298,7 +292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             guard let self, self.microphonePermissionGranted else { return }
             inputEventLogger.info("Audio configuration changed; refreshing the input session")
-            self.startRetainedInputSession(reason: "configuration-change")
+            self.restartRetainedInputSession(reason: "configuration-change")
         }
 
         if permissionAlreadyGranted {
@@ -355,6 +349,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             inputEventLogger.error("Input session failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    private func restartRetainedInputSession(reason: String) {
+        if inputTapInstalled {
+            inputEngine.inputNode.removeTap(onBus: 0)
+            inputTapInstalled = false
+        }
+        inputEngine.stop()
+        inputEngine.reset()
+        startRetainedInputSession(reason: reason)
     }
 
     private func configureRemoteCommandTelemetry() {
@@ -466,28 +470,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyGlobalMicrophoneMute(_ shouldMute: Bool) -> Bool {
+        if !shouldMute {
+            return restoreMutedInputDevice()
+        }
+
         guard let deviceID = defaultInputDevice() else {
             inputEventLogger.error("No default microphone was available")
             return false
         }
-        if !shouldMute {
-            if usesDeviceMute {
-                guard setInputMuted(originalMuted, for: deviceID) else { return false }
-            } else if !setInputVolume(originalVolume, for: deviceID) {
-                return false
-            }
-        } else {
-            if let isMuted = inputMuted(for: deviceID) {
-                originalMuted = isMuted
-                usesDeviceMute = true
-                guard setInputMuted(true, for: deviceID) else { return false }
-            } else {
-                originalVolume = max(inputVolume(for: deviceID), 0.01)
-                usesDeviceMute = false
-                guard setInputVolume(0, for: deviceID) else { return false }
-            }
+        if muted, mutedDeviceID == deviceID {
+            return true
         }
+        if muted, !restoreMutedInputDevice() {
+            return false
+        }
+
+        if let isMuted = inputMuted(for: deviceID) {
+            originalMuted = isMuted
+            usesDeviceMute = true
+            guard setInputMuted(true, for: deviceID) else { return false }
+        } else {
+            originalVolume = max(inputVolume(for: deviceID), 0.01)
+            usesDeviceMute = false
+            guard setInputVolume(0, for: deviceID) else { return false }
+        }
+        mutedDeviceID = deviceID
         muted = shouldMute
+        return true
+    }
+
+    private func restoreMutedInputDevice() -> Bool {
+        guard let deviceID = mutedDeviceID else {
+            muted = false
+            return true
+        }
+        let restored = usesDeviceMute
+            ? setInputMuted(originalMuted, for: deviceID)
+            : setInputVolume(originalVolume, for: deviceID)
+        guard restored else { return false }
+        mutedDeviceID = nil
+        muted = false
         return true
     }
 
@@ -524,6 +546,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func shutDownAudio() {
         approvalTimer?.invalidate()
         approvalTimer = nil
+        if muted, !restoreMutedInputDevice() {
+            inputEventLogger.error("Could not restore the microphone state during shutdown")
+        }
         if inputTapInstalled {
             inputEngine.inputNode.removeTap(onBus: 0)
             inputTapInstalled = false
