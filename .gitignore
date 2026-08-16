@@ -1,0 +1,6 @@
+.artifacts/
+.build/
+.codex/
+.DS_Store
+dist/
+*.xcuserstate
